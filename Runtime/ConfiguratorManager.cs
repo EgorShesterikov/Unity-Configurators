@@ -12,6 +12,7 @@ namespace Utility.Configurators
 
         private readonly MultiPool<Type, IConditionHandler> _conditionHandlerPool = new();
         private readonly MultiPool<Type, IModificationHandler> _modificationHandlerPool = new();
+        private readonly MultiPool<Type, IInstructionHandler> _instructionHandlerPool = new();
 
         private readonly Dictionary<object, IDisposable> _activeBindings = new();
 
@@ -24,6 +25,19 @@ namespace Utility.Configurators
 
             BindLifetime(binding, lifetimeOwner);
             processor.Apply(context);
+
+            return binding;
+        }
+
+        public IDisposable ApplyInstructions(InstructionProcessor processor, Component lifetimeOwner = null)
+        {
+            if (processor == null)
+                return EmptyDisposable.Instance;
+
+            var binding = ResolveInstructions(processor);
+
+            BindLifetime(binding, lifetimeOwner);
+            processor.Apply();
 
             return binding;
         }
@@ -61,13 +75,39 @@ namespace Utility.Configurators
             _activeBindings[processor] = disposable;
 
             var modifications = processor.Modifications;
-            
+
             if (modifications != null)
                 foreach (var mod in modifications)
                     if (mod is IHandlerBinder binder)
                         BindHandler(_modificationHandlerPool, binder);
 
             disposable.Register(() => UnregisterModification(processor));
+            return disposable;
+        }
+
+        public IDisposable ResolveInstructions(InstructionProcessor processor)
+        {
+            if (processor == null)
+                return EmptyDisposable.Instance;
+
+            if (_activeBindings.ContainsKey(processor))
+            {
+                Debug.LogWarning("[ConfiguratorManager] InstructionProcessor is already resolved. " +
+                                 "Dispose the previous binding before resolving again.");
+                return EmptyDisposable.Instance;
+            }
+
+            var disposable = new ProcessorDisposable();
+            _activeBindings[processor] = disposable;
+
+            var instructions = processor.Instructions;
+
+            if (instructions != null)
+                foreach (var instruction in instructions)
+                    if (instruction is IHandlerBinder binder)
+                        BindHandler(_instructionHandlerPool, binder);
+
+            disposable.Register(() => UnregisterInstruction(processor));
             return disposable;
         }
 
@@ -120,13 +160,27 @@ namespace Utility.Configurators
             _activeBindings.Remove(processor);
 
             var modifications = processor.Modifications;
-            
+
             if (modifications == null)
                 return;
 
             foreach (var mod in modifications)
                 if (mod is IHandlerBinder binder)
                     ReleaseHandler(_modificationHandlerPool, binder);
+        }
+
+        private void UnregisterInstruction(InstructionProcessor processor)
+        {
+            _activeBindings.Remove(processor);
+
+            var instructions = processor.Instructions;
+
+            if (instructions == null)
+                return;
+
+            foreach (var instruction in instructions)
+                if (instruction is IHandlerBinder binder)
+                    ReleaseHandler(_instructionHandlerPool, binder);
         }
 
         private void UnregisterCondition(ConditionProcessor processor)

@@ -4,7 +4,7 @@
 
 ---
 
-Сериализуемая, пулящаяся и DI-aware система для **модификаций** (одноразовых эффектов, применяемых к контексту) и **условий** (булевых предикатов с уведомлениями об изменениях). Оба строятся из полиморфных `[SerializeReference]`-списков, которые ты заполняешь в инспекторе.
+Сериализуемая, пулящаяся и DI-aware система для **модификаций** (одноразовых эффектов, применяемых к контексту), **инструкций** (одноразовых эффектов без контекста, с инспекторными ссылками на цели), **условий** (булевых предикатов с уведомлениями об изменениях) и **экстеншенов** (пассивных носителей значений, читаемых по запросу). Всё это строится из полиморфных `[SerializeReference]`-списков, которые ты заполняешь в инспекторе.
 
 ## Установка
 
@@ -23,9 +23,10 @@
 | Термин | Что это                                                                                                                                                |
 |---|--------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Modification** | Единица работы, применяемая к некоторому `TContext`. Например: «выставить max HP», «добавить тег», «заспавнить дочерний объект».                       |
+| **Instruction** | Единица работы, выполняемая без контекста — цели хранятся прямо в инспекторных полях data-класса. Например: `GameObjectSetActive`, `PlaySound`.        |
 | **Condition** | Булево условие, которое можно проверить (`IsMet`) и слушать (`AddListener`).                                                                           |
 | **Extension** | Пассивный носитель значения, прикреплённый к конфигу (например, `MaxCount`, `Cooldown`). Читается фичей через `ExtensionProcessor.TryGetExtension<T>`. |
-| **Processor** | Контейнер со списком модификаций / условий / экстеншенов. Лежит на конфиге или компоненте.                                                             |
+| **Processor** | Контейнер со списком модификаций / инструкций / условий / экстеншенов. Лежит на конфиге или компоненте.                                                |
 | **Handler** | Резолвится через DI и пулится. Опционален — нужен только если хочешь инжект сервисов или повторное использование.                                      |
 | **ConfiguratorManager** | Project-scoped сервис, который резолвит хендлеры, управляет их лайфтаймом и подключает условия к слушателям.                                           |
 
@@ -56,7 +57,7 @@ public class SetMaxHealth : Modification<ActorUnit>
 Для модификаций, которым нужны инжектируемые сервисы или состояние. Данные и логика — в разных классах.
 
 ```csharp
-// данные — лежат в конфиге, чистый POCO
+// данные — лежат в конфиге
 [Serializable]
 [ConfiguratorCategory("Spawn")]
 public class SpawnChild : ModificationData<ActorUnit, SpawnChildHandler>
@@ -74,6 +75,45 @@ public class SpawnChildHandler : ModificationHandler<SpawnChild, ActorUnit>
     {
         _creator.Instantiate(Data.Prefab, (Vector2)context.transform.position + Data.Offset, null);
     }
+}
+```
+
+## Определение инструкции
+
+Инструкция — это модификация без контекста: цель хранится прямо в сериализованных полях data-класса, а `Apply()` вызывается без аргументов. Те же два варианта.
+
+### Inline (без DI и пулинга)
+
+```csharp
+[Serializable]
+[ConfiguratorCategory("GameObject")]
+public class GameObjectSetActive : Instruction
+{
+    public GameObject Object;
+    public bool Value;
+
+    public override void Apply() => Object.SetActive(Value);
+}
+```
+
+### С хендлером (DI + пулинг)
+
+```csharp
+// данные
+[Serializable]
+[ConfiguratorCategory("Audio")]
+public class PlaySound : InstructionData<PlaySoundHandler>
+{
+    public AudioClip Clip;
+    [Range(0, 1)] public float Volume = 1f;
+}
+
+// хендлер — создаётся Zenject-ом, возвращается в пул при диспозе
+public class PlaySoundHandler : InstructionHandler<PlaySound>
+{
+    [Inject] private readonly IAudioService _audio;
+
+    public override void Apply() => _audio.PlayOneShot(Data.Clip, Data.Volume);
 }
 ```
 
@@ -149,7 +189,7 @@ int max = item.ExtensionProcessor.TryGetExtension(out MaxCount ext) ? ext : int.
 
 ## Рантайм-использование
 
-Инжекти `IConfiguratorManager` и вызывай один из четырёх методов.
+Инжекти `IConfiguratorManager` и вызывай один из методов ниже.
 
 ### Применить модификации к контексту
 
@@ -179,6 +219,21 @@ public class SomeService : IDisposable
 }
 ```
 
+### Применить инструкции
+
+То же самое, что и для модификаций, только без аргумента-контекста:
+
+```csharp
+[Inject] private readonly IConfiguratorManager _configurators;
+
+[SerializeField] private InstructionProcessor onSpawn;
+
+private void Start()
+{
+    _configurators.ApplyInstructions(onSpawn, lifetimeOwner: this);
+}
+```
+
 ### Подписаться на процессор условий
 
 ```csharp
@@ -197,7 +252,7 @@ private void OnEnable()
 
 ### Только резолв (низкий уровень)
 
-Когда нужно отделить момент привязки хендлеров от момента применения:
+Когда нужно отделить момент привязки хендлеров от момента применения модификаций / инструкций / условий:
 
 ```csharp
 IDisposable binding = _configurators.ResolveModifications(processor);
@@ -209,9 +264,9 @@ binding.Dispose();
 
 ## Инспектор
 
-Встроенные процессоры (`ModificationProcessor<T>`, `ConditionProcessor`, `ExtensionProcessor`) уже отдают типизированный дропдаун — кладёшь процессор в конфиг / компонент и оно работает, никаких списков объявлять не надо.
+Встроенные процессоры (`ModificationProcessor<T>`, `InstructionProcessor`, `ConditionProcessor`, `ExtensionProcessor`) уже отдают типизированный дропдаун — кладёшь процессор в конфиг / компонент и оно работает, никаких списков объявлять не надо.
 
-Чтобы сгруппировать свои модификации / условия / экстеншены под подменю в этом дропдауне, навесь на класс `[ConfiguratorCategory("Path/Submenu")]`:
+Чтобы сгруппировать свои модификации / инструкции / условия / экстеншены под подменю в этом дропдауне, навесь на класс `[ConfiguratorCategory("Path/Submenu")]`:
 
 ```csharp
 [Serializable]
@@ -227,7 +282,7 @@ public class MaxCount : Extension<int> { ... }
 
 ## Контракт лайфтайма
 
-* `ApplyModifications` / `SubscribeConditions` всегда возвращают `IDisposable`. С `lifetimeOwner` cleanup автоматический на уничтожении владельца; без него — вызывающий сам отвечает за диспоз.
+* `ApplyModifications` / `ApplyInstructions` / `SubscribeConditions` всегда возвращают `IDisposable`. С `lifetimeOwner` cleanup автоматический на уничтожении владельца; без него — вызывающий сам отвечает за диспоз.
 * Вызов одного и того же метода дважды на одном процессоре без диспоза первого — баг, выдаёт warning и no-op.
 * `Dispose()` идемпотентен и безопасен в любом порядке — исключения в cleanup логируются, а не пробрасываются.
 

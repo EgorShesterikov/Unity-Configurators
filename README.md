@@ -4,7 +4,7 @@
 
 ---
 
-A serializable, pooled, DI-aware system for **modifications** (one-shot effects applied to a context) and **conditions** (boolean predicates with change notifications). Both are built from polymorphic `[SerializeReference]` lists you fill in the inspector.
+A serializable, pooled, DI-aware system for **modifications** (one-shot effects applied to a context), **instructions** (contextless one-shot effects with inspector-driven targets), **conditions** (boolean predicates with change notifications), and **extensions** (passive value carriers read on demand). All built from polymorphic `[SerializeReference]` lists you fill in the inspector.
 
 ## Installation
 
@@ -23,9 +23,10 @@ Either way, everything compiles into the default `Assembly-CSharp` — no assemb
 | Term | Meaning |
 |---|---|
 | **Modification** | A unit of work applied to some `TContext`. Example: "set max HP", "add tag", "spawn child". |
+| **Instruction** | A unit of work that runs without a context — its targets are inspector references on the data class itself. Example: `GameObjectSetActive`, `PlaySound`. |
 | **Condition** | A boolean predicate that can be queried (`IsMet`) and listened to (`AddListener`). |
 | **Extension** | A passive value carrier attached to a config (e.g. `MaxCount`, `Cooldown`). Read by feature code via `ExtensionProcessor.TryGetExtension<T>`. |
-| **Processor** | Container that holds a list of modifications / conditions / extensions. Lives on a config or component. |
+| **Processor** | Container that holds a list of modifications / instructions / conditions / extensions. Lives on a config or component. |
 | **Handler** | DI-resolved, pooled runtime logic for a data object. Optional — only needed when you want injected services or pooling. |
 | **ConfiguratorManager** | Project-scoped service that resolves handlers, manages their lifetime, and wires conditions to listeners. |
 
@@ -56,7 +57,7 @@ public class SetMaxHealth : Modification<ActorUnit>
 For modifications that need injected services or stateful logic. Data and behaviour live in separate classes.
 
 ```csharp
-// data — sits in the config, pure POCO
+// data — sits in the config
 [Serializable]
 [ConfiguratorCategory("Spawn")]
 public class SpawnChild : ModificationData<ActorUnit, SpawnChildHandler>
@@ -74,6 +75,45 @@ public class SpawnChildHandler : ModificationHandler<SpawnChild, ActorUnit>
     {
         _creator.Instantiate(Data.Prefab, (Vector2)context.transform.position + Data.Offset, null);
     }
+}
+```
+
+## Defining an instruction
+
+An instruction is a contextless modification — it carries its own target through serialized inspector fields and runs `Apply()` with no arguments. Same two flavours.
+
+### Inline (no DI, no pooling)
+
+```csharp
+[Serializable]
+[ConfiguratorCategory("GameObject")]
+public class GameObjectSetActive : Instruction
+{
+    public GameObject Object;
+    public bool Value;
+
+    public override void Apply() => Object.SetActive(Value);
+}
+```
+
+### Handler-based (DI + pooling)
+
+```csharp
+// data
+[Serializable]
+[ConfiguratorCategory("Audio")]
+public class PlaySound : InstructionData<PlaySoundHandler>
+{
+    public AudioClip Clip;
+    [Range(0, 1)] public float Volume = 1f;
+}
+
+// handler — created by Zenject, returned to a pool on dispose
+public class PlaySoundHandler : InstructionHandler<PlaySound>
+{
+    [Inject] private readonly IAudioService _audio;
+
+    public override void Apply() => _audio.PlayOneShot(Data.Clip, Data.Volume);
 }
 ```
 
@@ -149,7 +189,7 @@ For multiple extensions of the same type use `GetExtensions<T>()` instead.
 
 ## Runtime usage
 
-Inject `IConfiguratorManager` and call one of four methods.
+Inject `IConfiguratorManager` and call one of the methods below.
 
 ### Apply modifications to a context
 
@@ -178,6 +218,21 @@ public class SomeService : IDisposable
 }
 ```
 
+### Apply instructions
+
+Same shape as modifications, just without a context argument:
+
+```csharp
+[Inject] private readonly IConfiguratorManager _configurators;
+
+[SerializeField] private InstructionProcessor onSpawn;
+
+private void Start()
+{
+    _configurators.ApplyInstructions(onSpawn, lifetimeOwner: this);
+}
+```
+
 ### Subscribe to a condition processor
 
 ```csharp
@@ -196,7 +251,7 @@ private void OnEnable()
 
 ### Resolve only (low-level)
 
-When you want to control when modifications are applied independently of when handlers are bound:
+When you want to control when modifications / instructions / conditions are applied independently of when handlers are bound:
 
 ```csharp
 IDisposable binding = _configurators.ResolveModifications(processor);
@@ -208,9 +263,9 @@ binding.Dispose();
 
 ## Inspector
 
-The built-in processors (`ModificationProcessor<T>`, `ConditionProcessor`, `ExtensionProcessor`) already expose a typed dropdown — drop one on a config / component and it just works, no list declaration on your side.
+The built-in processors (`ModificationProcessor<T>`, `InstructionProcessor`, `ConditionProcessor`, `ExtensionProcessor`) already expose a typed dropdown — drop one on a config / component and it just works, no list declaration on your side.
 
-To group your own modifications / conditions / extensions under a submenu in that dropdown, decorate the class with `[ConfiguratorCategory("Path/Submenu")]`:
+To group your own modifications / instructions / conditions / extensions under a submenu in that dropdown, decorate the class with `[ConfiguratorCategory("Path/Submenu")]`:
 
 ```csharp
 [Serializable]
@@ -226,7 +281,7 @@ If you ever need a polymorphic list outside the built-in processors, decorate it
 
 ## Lifetime contract
 
-* `ApplyModifications` / `SubscribeConditions` always return an `IDisposable`. With a `lifetimeOwner` cleanup is automatic on owner destruction; without one, the caller owns disposal.
+* `ApplyModifications` / `ApplyInstructions` / `SubscribeConditions` always return an `IDisposable`. With a `lifetimeOwner` cleanup is automatic on owner destruction; without one, the caller owns disposal.
 * Calling the same method twice on the same processor without disposing the first binding is a bug and produces a warning + no-op.
 * Calling `Dispose()` on the returned `IDisposable` is idempotent and safe in any order — exceptions in cleanup are logged, not thrown.
 
